@@ -84,6 +84,24 @@ final class DatabaseManager: Sendable {
             try db.create(indexOn: "instance", columns: ["filePath"])
         }
 
+        migrator.registerMigration("v2_dicomNodes") { db in
+            try db.create(table: "dicom_node", ifNotExists: true) { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("aeTitle", .text).notNull()
+                t.column("hostname", .text).notNull()
+                t.column("port", .integer).notNull()
+                t.column("description", .text)
+                t.column("isQueryRetrieve", .boolean).notNull().defaults(to: true)
+                t.column("isStorage", .boolean).notNull().defaults(to: true)
+                t.column("isActive", .boolean).notNull().defaults(to: true)
+                t.uniqueKey(["aeTitle", "hostname", "port"])
+            }
+
+            // Indices for PACS node queries
+            try db.create(indexOn: "dicom_node", columns: ["aeTitle"])
+            try db.create(indexOn: "dicom_node", columns: ["isActive"])
+        }
+
         try migrator.migrate(dbQueue)
     }
 
@@ -202,6 +220,30 @@ final class DatabaseManager: Sendable {
         }.value
     }
 
+    /// Index a DICOMDIR by parsing the directory structure and extracting tags.
+    func indexDicomdir(
+        path: String,
+        bridge: DicomBridgeWrapper,
+        progress: @escaping @Sendable (Int, Int) -> Void
+    ) async throws {
+        try await Task.detached { [self] in
+            try bridge.scanDicomdir(
+                path: path,
+                onFile: { [self] tagData in
+                    do {
+                        try self.insertFromTags(tagData)
+                    } catch {
+                        NSLog("[DatabaseManager] DICOMDIR insert failed: %@",
+                              error.localizedDescription)
+                    }
+                },
+                onProgress: { processed, found in
+                    progress(processed, found)
+                }
+            )
+        }.value
+    }
+
     // MARK: - Queries
 
     func fetchPatients() throws -> [Patient] {
@@ -234,6 +276,43 @@ final class DatabaseManager: Sendable {
                 .filter(Column("seriesRowID") == seriesRowID)
                 .order(Column("instanceNumber"))
                 .fetchAll(db)
+        }
+    }
+
+    // MARK: - DICOM Node Operations
+
+    /// Fetch all DICOM nodes
+    func fetchDicomNodes() throws -> [DicomNode] {
+        try dbQueue.read { db in
+            try DicomNode
+                .order(Column("aeTitle"))
+                .fetchAll(db)
+        }
+    }
+
+    /// Insert a new DICOM node
+    func insertDicomNode(_ node: DicomNode) throws -> Int64 {
+        try dbQueue.write { db in
+            var mutableNode = node
+            try mutableNode.validate()
+            try mutableNode.insert(db)
+            return db.lastInsertedRowID
+        }
+    }
+
+    /// Update an existing DICOM node
+    func updateDicomNode(_ node: DicomNode) throws {
+        try dbQueue.write { db in
+            var mutableNode = node
+            try mutableNode.validate()
+            try mutableNode.update(db)
+        }
+    }
+
+    /// Delete a DICOM node by ID
+    func deleteDicomNode(id: Int64) throws {
+        try dbQueue.write { db in
+            try DicomNode.deleteOne(db, key: id)
         }
     }
 }

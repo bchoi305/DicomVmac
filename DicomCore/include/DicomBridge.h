@@ -43,6 +43,9 @@ typedef struct {
     double    pixelSpacingX;    // mm per pixel (column direction), 0 if unknown
     double    pixelSpacingY;    // mm per pixel (row direction), 0 if unknown
     int       hasPixelSpacing;  // 1 if PixelSpacing tag was present
+    double    imagePositionZ;   // Z component of ImagePositionPatient
+    double    sliceThickness;   // SliceThickness tag value
+    int       hasImagePosition; // 1 if ImagePositionPatient was present
 } DB_Frame16;
 
 // --- Lifecycle ---
@@ -97,6 +100,173 @@ DB_Status db_scan_folder(const char* folderPath,
                          DB_ScanCallback onFile,
                          DB_ScanProgressCallback onProgress,
                          void* userData);
+
+// --- DICOMDIR support ---
+
+/// Callback invoked for each DICOM file referenced in DICOMDIR.
+typedef void (*DB_DicomdirFileCallback)(void* userData,
+                                         const DB_DicomTags* tags,
+                                         const char* filePath);
+
+/// Callback for DICOMDIR scan progress.
+typedef void (*DB_DicomdirProgressCallback)(void* userData,
+                                             int recordsProcessed,
+                                             int filesFound);
+
+/// Scan a DICOMDIR file and invoke callback for each referenced image.
+/// - dicomdirPath: Path to the DICOMDIR file
+/// - onFile: Called for each valid DICOM file with extracted tags
+/// - onProgress: Called periodically with progress info
+/// - userData: User context passed to callbacks
+/// Returns DB_STATUS_OK on success.
+DB_Status db_scan_dicomdir(const char* dicomdirPath,
+                            DB_DicomdirFileCallback onFile,
+                            DB_DicomdirProgressCallback onProgress,
+                            void* userData);
+
+/// Check if a path points to a DICOMDIR file (or folder containing one).
+/// Returns 1 if DICOMDIR, 0 otherwise.
+int db_is_dicomdir(const char* path);
+
+// --- DICOM Networking ---
+
+/// Network operation result
+typedef struct {
+    DB_Status status;           // Operation status
+    char errorMessage[256];     // Human-readable error message
+    int dimseStatus;            // DIMSE status code (0 = success)
+} DB_NetworkResult;
+
+/// DICOM node (PACS server) configuration
+typedef struct {
+    char aeTitle[17];           // Application Entity Title (max 16 chars + null)
+    char hostname[256];         // Hostname or IP address
+    int port;                   // Port number (typically 104)
+} DB_DicomNode;
+
+/// Query callback invoked for each C-FIND response
+typedef void (*DB_QueryCallback)(void* userData, const DB_DicomTags* tags);
+
+/// Progress callback for C-MOVE and C-STORE operations
+typedef void (*DB_MoveProgressCallback)(void* userData,
+                                        int completed,
+                                        int remaining,
+                                        int failed);
+
+/// Test connectivity to PACS server (C-ECHO)
+/// - localAE: Local Application Entity Title
+/// - remoteNode: Remote PACS node configuration
+/// - timeoutSeconds: Operation timeout
+/// Returns result with DIMSE status code
+DB_NetworkResult db_echo(const char* localAE,
+                         const DB_DicomNode* remoteNode,
+                         int timeoutSeconds);
+
+/// Query PACS for studies (C-FIND at STUDY level)
+/// - localAE: Local Application Entity Title
+/// - remoteNode: Remote PACS node configuration
+/// - searchCriteria: DICOM tags to use as search criteria (NULL fields are wildcards)
+/// - onResult: Callback invoked for each matching study
+/// - userData: User context passed to callback
+/// - timeoutSeconds: Operation timeout
+/// Returns result with total matches found
+DB_NetworkResult db_find_studies(const char* localAE,
+                                  const DB_DicomNode* remoteNode,
+                                  const DB_DicomTags* searchCriteria,
+                                  DB_QueryCallback onResult,
+                                  void* userData,
+                                  int timeoutSeconds);
+
+/// Retrieve study from PACS (C-MOVE)
+/// - localAE: Local Application Entity Title (also used as move destination)
+/// - remoteNode: Remote PACS node configuration
+/// - studyInstanceUID: Study to retrieve
+/// - destinationFolder: Local folder to store retrieved files
+/// - onProgress: Callback for progress updates
+/// - userData: User context passed to callback
+/// - timeoutSeconds: Operation timeout
+/// Returns result with transfer statistics
+DB_NetworkResult db_move_study(const char* localAE,
+                                const DB_DicomNode* remoteNode,
+                                const char* studyInstanceUID,
+                                const char* destinationFolder,
+                                DB_MoveProgressCallback onProgress,
+                                void* userData,
+                                int timeoutSeconds);
+
+/// Send study to PACS (C-STORE)
+/// - localAE: Local Application Entity Title
+/// - remoteNode: Remote PACS node configuration
+/// - filePaths: Array of DICOM file paths to send
+/// - fileCount: Number of files in array
+/// - onProgress: Callback for progress updates
+/// - userData: User context passed to callback
+/// - timeoutSeconds: Operation timeout
+/// Returns result with transfer statistics
+DB_NetworkResult db_store_study(const char* localAE,
+                                 const DB_DicomNode* remoteNode,
+                                 const char* const* filePaths,
+                                 int fileCount,
+                                 DB_MoveProgressCallback onProgress,
+                                 void* userData,
+                                 int timeoutSeconds);
+
+// ============================================================================
+// ANONYMIZATION FUNCTIONS
+// ============================================================================
+
+/// Action to perform on a DICOM tag
+typedef enum {
+    DB_TAG_ACTION_REMOVE = 0,      // Remove tag entirely
+    DB_TAG_ACTION_REPLACE = 1,     // Replace with specified value
+    DB_TAG_ACTION_HASH = 2,        // Replace with hash of original
+    DB_TAG_ACTION_EMPTY = 3,       // Replace with empty string
+    DB_TAG_ACTION_KEEP = 4,        // Keep original value
+    DB_TAG_ACTION_GENERATE_UID = 5 // Generate new UID
+} DB_TagAction;
+
+/// Rule for anonymizing a specific DICOM tag
+typedef struct {
+    unsigned short group;      // DICOM tag group (e.g., 0x0010)
+    unsigned short element;    // DICOM tag element (e.g., 0x0010)
+    DB_TagAction action;       // Action to perform
+    char replacementValue[256]; // Used when action is REPLACE
+} DB_TagRule;
+
+/// Anonymization configuration
+typedef struct {
+    DB_TagRule* tagRules;      // Array of tag rules
+    int tagRuleCount;          // Number of rules in array
+    bool removePrivateTags;    // Remove all private tags
+    bool replaceStudyUID;      // Replace Study Instance UID
+    bool replaceSeriesUID;     // Replace Series Instance UID
+    bool replaceSOPUID;        // Replace SOP Instance UID
+    int dateShiftDays;         // Number of days to shift dates (0 = no shift, -1 = remove dates)
+} DB_AnonymizationConfig;
+
+/// Anonymize a DICOM file
+/// - inputPath: Path to original DICOM file
+/// - outputPath: Path for anonymized output file
+/// - config: Anonymization configuration
+/// Returns DB_STATUS_OK on success, error code otherwise
+DB_Status db_anonymize_file(const char* inputPath,
+                             const char* outputPath,
+                             const DB_AnonymizationConfig* config);
+
+/// Anonymize a DICOM file in-place
+/// - filePath: Path to DICOM file to anonymize
+/// - config: Anonymization configuration
+/// Returns DB_STATUS_OK on success, error code otherwise
+DB_Status db_anonymize_file_inplace(const char* filePath,
+                                     const DB_AnonymizationConfig* config);
+
+/// Generate a hash string for patient ID mapping
+/// - input: Original value to hash
+/// - output: Buffer to store hash (must be at least 65 bytes)
+/// - outputSize: Size of output buffer
+void db_generate_hash(const char* input,
+                      char* output,
+                      size_t outputSize);
 
 #ifdef __cplusplus
 }

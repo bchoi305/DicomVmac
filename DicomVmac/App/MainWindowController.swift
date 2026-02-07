@@ -3,7 +3,7 @@
 //  DicomVmac
 //
 //  Creates and manages the main application window with a split view:
-//  sidebar (study browser) on the left, Metal viewer canvas on the right.
+//  sidebar (study browser) on the left, viewer grid on the right.
 //
 
 import AppKit
@@ -11,8 +11,13 @@ import AppKit
 final class MainWindowController: NSWindowController {
 
     private var sidebarVC: SidebarViewController!
-    private var viewerVC: ViewerViewController!
+    private var gridVC: ViewerGridViewController!
     nonisolated(unsafe) private var seriesObserver: Any?
+
+    // Current selection context for export
+    var currentInstance: Instance?
+    var currentSeriesRowID: Int64?
+    var currentStudyRowID: Int64?
 
     init() {
         let contentRect = NSRect(x: 0, y: 0, width: 1280, height: 800)
@@ -53,7 +58,7 @@ final class MainWindowController: NSWindowController {
         let splitView = NSSplitViewController()
 
         sidebarVC = SidebarViewController()
-        viewerVC = ViewerViewController()
+        gridVC = ViewerGridViewController()
 
         // Sidebar (study browser)
         let sidebarItem = NSSplitViewItem(
@@ -63,9 +68,9 @@ final class MainWindowController: NSWindowController {
         sidebarItem.maximumThickness = 400
         splitView.addSplitViewItem(sidebarItem)
 
-        // Main content (Metal viewer)
+        // Main content (viewer grid)
         let viewerItem = NSSplitViewItem(
-            contentListWithViewController: viewerVC
+            contentListWithViewController: gridVC
         )
         viewerItem.minimumThickness = 400
         splitView.addSplitViewItem(viewerItem)
@@ -80,17 +85,54 @@ final class MainWindowController: NSWindowController {
             forName: .dicomSeriesDidSelect, object: nil, queue: .main
         ) { [weak self] notification in
             guard let series = notification.userInfo?["series"] as? Series else { return }
-            self?.viewerVC.loadSeries(series)
+            self?.gridVC.loadSeries(series)
+
+            // Track current selection context for export
+            self?.currentSeriesRowID = series.id
+            self?.currentStudyRowID = series.studyRowID
+
+            // Try to get the first instance from the series
+            if let db = AppDelegate.shared.databaseManager,
+               let seriesID = series.id {
+                do {
+                    let instances = try db.fetchInstances(forSeries: seriesID)
+                    self?.currentInstance = instances.first
+                } catch {
+                    NSLog("[MainWindowController] Failed to fetch instances: %@", error.localizedDescription)
+                }
+            }
         }
     }
 
     // MARK: - Annotation Tool Actions
 
     func setAnnotationTool(_ tool: AnnotationTool) {
-        viewerVC.setAnnotationTool(tool)
+        gridVC.setAnnotationTool(tool)
     }
 
     func deleteSelectedAnnotation() {
-        viewerVC.deleteSelectedAnnotation()
+        gridVC.deleteSelectedAnnotation()
+    }
+
+    // MARK: - Layout Actions
+
+    /// Set the viewer grid layout.
+    func setLayout(_ layout: HangingProtocol) {
+        gridVC.setLayout(layout)
+    }
+
+    /// Get the current layout.
+    var currentLayout: HangingProtocol {
+        gridVC.currentLayout
+    }
+
+    /// Toggle viewer linking.
+    func toggleLinking() {
+        gridVC.isLinked.toggle()
+    }
+
+    /// Check if viewers are linked.
+    var isLinked: Bool {
+        gridVC.isLinked
     }
 }
