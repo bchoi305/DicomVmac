@@ -3,6 +3,7 @@
 //  DicomVmacTests
 //
 
+import Foundation
 import Testing
 @testable import DicomVmac
 
@@ -160,7 +161,8 @@ struct FrameCacheTests {
             width: width, height: height, bitsStored: 12,
             rescaleSlope: 1.0, rescaleIntercept: 0.0,
             windowCenter: 40.0, windowWidth: 400.0,
-            pixelSpacingX: 1.0, pixelSpacingY: 1.0)
+            pixelSpacingX: 1.0, pixelSpacingY: 1.0,
+            imagePositionZ: 0.0, sliceThickness: 1.0)
     }
 
     @Test("Cache stores and retrieves frames")
@@ -249,7 +251,8 @@ struct AnnotationTests {
             width: 100, height: 100, bitsStored: 12,
             rescaleSlope: 1.0, rescaleIntercept: 0.0,
             windowCenter: 40.0, windowWidth: 400.0,
-            pixelSpacingX: 1.0, pixelSpacingY: 1.0)
+            pixelSpacingX: 1.0, pixelSpacingY: 1.0,
+            imagePositionZ: 0.0, sliceThickness: 1.0)
 
         let result = MeasurementCalculator.calculateLength(annotation, frameData: frame)
 
@@ -270,7 +273,8 @@ struct AnnotationTests {
             width: 100, height: 100, bitsStored: 12,
             rescaleSlope: 1.0, rescaleIntercept: 0.0,
             windowCenter: 40.0, windowWidth: 400.0,
-            pixelSpacingX: nil, pixelSpacingY: nil)
+            pixelSpacingX: nil, pixelSpacingY: nil,
+            imagePositionZ: nil, sliceThickness: nil)
 
         let result = MeasurementCalculator.calculateLength(annotation, frameData: frame)
 
@@ -326,5 +330,315 @@ struct AnnotationTests {
         let mid = p1.midpoint(to: p2)
         #expect(abs(mid.x - 0.5) < 0.001)
         #expect(abs(mid.y - 0.5) < 0.001)
+    }
+}
+
+@Suite("MPR Tests")
+struct MPRTests {
+
+    @Test("MPRUniforms has correct default values")
+    func mprUniformsDefaults() {
+        let u = MPRUniforms()
+        #expect(u.windowCenter == 40.0)
+        #expect(u.windowWidth == 400.0)
+        #expect(u.rescaleSlope == 1.0)
+        #expect(u.rescaleIntercept == -1024.0)
+        #expect(u.zoomScale == 1.0)
+        #expect(u.slicePosition == 0.5)
+        #expect(u.plane == 0)
+        #expect(u.showCrosshair == 1)
+    }
+
+    @Test("MPRUniforms memory layout is contiguous")
+    func mprUniformsLayout() {
+        let size = MemoryLayout<MPRUniforms>.stride
+        #expect(size > 0)
+        // Verify struct can be safely copied to Metal buffer
+        #expect(size >= 40) // Minimum expected size
+    }
+
+    @Test("VolumeData initialization")
+    func volumeDataInit() {
+        let data = VolumeData(
+            seriesRowID: 1,
+            width: 512,
+            height: 512,
+            depth: 100,
+            pixelSpacingX: 0.5,
+            pixelSpacingY: 0.5,
+            sliceSpacing: 1.0,
+            rescaleSlope: 1.0,
+            rescaleIntercept: -1024.0,
+            windowCenter: 40.0,
+            windowWidth: 400.0,
+            bitsStored: 12
+        )
+
+        #expect(data.width == 512)
+        #expect(data.height == 512)
+        #expect(data.depth == 100)
+        #expect(data.sliceSpacing == 1.0)
+    }
+
+    @Test("MPRSlicePosition center initialization")
+    func slicePositionCenter() {
+        let pos = MPRSlicePosition.center
+        #expect(pos.axial == 0.5)
+        #expect(pos.coronal == 0.5)
+        #expect(pos.sagittal == 0.5)
+    }
+
+    @Test("MPRPlane display names")
+    func planeDisplayNames() {
+        #expect(MPRPlane.axial.displayName == "Axial")
+        #expect(MPRPlane.coronal.displayName == "Coronal")
+        #expect(MPRPlane.sagittal.displayName == "Sagittal")
+    }
+
+    @Test("MPRPlane raw values")
+    func planeRawValues() {
+        #expect(MPRPlane.axial.rawValue == 0)
+        #expect(MPRPlane.coronal.rawValue == 1)
+        #expect(MPRPlane.sagittal.rawValue == 2)
+    }
+
+    @Test("VolumeLoadError descriptions")
+    func volumeLoadErrorDescriptions() {
+        let noInstances = VolumeLoadError.noInstances
+        #expect(noInstances.errorDescription?.contains("No instances") == true)
+
+        let inconsistent = VolumeLoadError.inconsistentDimensions
+        #expect(inconsistent.errorDescription?.contains("inconsistent") == true)
+
+        let insufficient = VolumeLoadError.insufficientSlices(count: 2)
+        #expect(insufficient.errorDescription?.contains("3 slices") == true)
+    }
+}
+
+@Suite("DICOMDIR Tests")
+struct DicomdirTests {
+
+    @Test("db_is_dicomdir returns 0 for non-existent path")
+    func isdicomdirNonExistent() {
+        let result = db_is_dicomdir("/nonexistent/path/DICOMDIR")
+        #expect(result == 0)
+    }
+
+    @Test("db_is_dicomdir returns 0 for null path")
+    func isdicomdirNull() {
+        let result = db_is_dicomdir(nil)
+        #expect(result == 0)
+    }
+
+    @Test("db_is_dicomdir returns 0 for regular file")
+    func isdicomdirRegularFile() {
+        // Use a known regular file (the app bundle executable)
+        let bundlePath = Bundle.main.executablePath ?? "/usr/bin/true"
+        let result = db_is_dicomdir(bundlePath)
+        #expect(result == 0)
+    }
+
+    @Test("db_is_dicomdir returns 0 for empty directory")
+    func isdicomdirEmptyDirectory() {
+        // Create temp directory
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let result = db_is_dicomdir(tmpDir.path)
+        #expect(result == 0)
+    }
+
+    @Test("Swift isDicomdir wrapper returns false for non-existent path")
+    func swiftWrapperNonExistent() {
+        let bridge = DicomBridgeWrapper()
+        let result = bridge.isDicomdir(path: "/nonexistent/DICOMDIR")
+        #expect(result == false)
+    }
+
+    @Test("Swift isDicomdir wrapper returns false for empty directory")
+    func swiftWrapperEmptyDir() {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let bridge = DicomBridgeWrapper()
+        let result = bridge.isDicomdir(path: tmpDir.path)
+        #expect(result == false)
+    }
+
+    @Test("db_scan_dicomdir returns NOT_FOUND for non-existent path")
+    func scanDicomdirNonExistent() {
+        let status = db_scan_dicomdir("/nonexistent/DICOMDIR", { _, _, _ in }, nil, nil)
+        #expect(status == DB_STATUS_NOT_FOUND)
+    }
+
+    @Test("db_scan_dicomdir returns ERROR for null path")
+    func scanDicomdirNull() {
+        let status = db_scan_dicomdir(nil, { _, _, _ in }, nil, nil)
+        #expect(status == DB_STATUS_ERROR)
+    }
+}
+
+@Suite("Hanging Protocol Tests")
+struct HangingProtocolTests {
+
+    @Test("Default layouts are defined")
+    func layoutsExist() {
+        #expect(HangingProtocol.layouts.count >= 4)
+    }
+
+    @Test("Layout properties are correct")
+    func layoutProperties() {
+        let layout1x1 = HangingProtocol.layouts[0]
+        #expect(layout1x1.id == "1x1")
+        #expect(layout1x1.rows == 1)
+        #expect(layout1x1.cols == 1)
+        #expect(layout1x1.cellCount == 1)
+
+        let layout2x2 = HangingProtocol.layouts[3]
+        #expect(layout2x2.id == "2x2")
+        #expect(layout2x2.rows == 2)
+        #expect(layout2x2.cols == 2)
+        #expect(layout2x2.cellCount == 4)
+    }
+
+    @Test("Layout cell count calculation")
+    func cellCount() {
+        let layout = HangingProtocol(id: "2x3", name: "2×3", rows: 2, cols: 3, keyEquivalent: nil)
+        #expect(layout.cellCount == 6)
+    }
+
+    @Test("Default layout is 1x1")
+    func defaultLayout() {
+        let defaultLayout = HangingProtocol.default
+        #expect(defaultLayout.id == "1x1")
+        #expect(defaultLayout.rows == 1)
+        #expect(defaultLayout.cols == 1)
+    }
+
+    @Test("Layout lookup by ID")
+    func layoutLookup() {
+        let found = HangingProtocol.layout(withID: "2x2")
+        #expect(found != nil)
+        #expect(found?.rows == 2)
+        #expect(found?.cols == 2)
+
+        let notFound = HangingProtocol.layout(withID: "invalid")
+        #expect(notFound == nil)
+    }
+
+    @Test("ViewerLinkOptions combinations")
+    func linkOptions() {
+        let options: ViewerLinkOptions = [.scroll, .windowLevel]
+        #expect(options.contains(.scroll))
+        #expect(options.contains(.windowLevel))
+        #expect(!options.contains(.zoom))
+
+        let all = ViewerLinkOptions.all
+        #expect(all.contains(.scroll))
+        #expect(all.contains(.windowLevel))
+        #expect(all.contains(.zoom))
+
+        let none = ViewerLinkOptions.none
+        #expect(!none.contains(.scroll))
+        #expect(!none.contains(.windowLevel))
+        #expect(!none.contains(.zoom))
+    }
+
+    @Test("HangingProtocol equatable")
+    func equatable() {
+        let layout1 = HangingProtocol(id: "1x1", name: "1×1", rows: 1, cols: 1, keyEquivalent: "1")
+        let layout2 = HangingProtocol(id: "1x1", name: "1×1", rows: 1, cols: 1, keyEquivalent: "1")
+        let layout3 = HangingProtocol(id: "2x2", name: "2×2", rows: 2, cols: 2, keyEquivalent: "4")
+
+        #expect(layout1 == layout2)
+        #expect(layout1 != layout3)
+    }
+}
+
+// MARK: - Volume Rendering Tests
+
+@Suite("Volume Rendering Tests")
+struct VolumeRenderingTests {
+
+    @Test("VolumeRenderMode has all cases")
+    func renderModeAllCases() {
+        let modes = VolumeRenderMode.allCases
+        #expect(modes.count == 5)
+        #expect(modes.contains(.slice))
+        #expect(modes.contains(.mip))
+        #expect(modes.contains(.minip))
+        #expect(modes.contains(.aip))
+        #expect(modes.contains(.vr))
+    }
+
+    @Test("VolumeRenderMode display names")
+    func renderModeDisplayNames() {
+        #expect(VolumeRenderMode.slice.displayName == "Slice")
+        #expect(VolumeRenderMode.mip.displayName == "MIP")
+        #expect(VolumeRenderMode.minip.displayName == "MinIP")
+        #expect(VolumeRenderMode.aip.displayName == "AIP")
+        #expect(VolumeRenderMode.vr.displayName == "Volume Rendering")
+    }
+
+    @Test("VolumeRenderMode raw values")
+    func renderModeRawValues() {
+        #expect(VolumeRenderMode.slice.rawValue == 0)
+        #expect(VolumeRenderMode.mip.rawValue == 1)
+        #expect(VolumeRenderMode.minip.rawValue == 2)
+        #expect(VolumeRenderMode.aip.rawValue == 3)
+        #expect(VolumeRenderMode.vr.rawValue == 4)
+    }
+
+    @Test("VolumeRenderMode isProjectionMode")
+    func renderModeIsProjection() {
+        #expect(!VolumeRenderMode.slice.isProjectionMode)
+        #expect(VolumeRenderMode.mip.isProjectionMode)
+        #expect(VolumeRenderMode.minip.isProjectionMode)
+        #expect(VolumeRenderMode.aip.isProjectionMode)
+        #expect(VolumeRenderMode.vr.isProjectionMode)
+    }
+
+    @Test("VRPreset has all cases")
+    func vrPresetAllCases() {
+        let presets = VRPreset.allCases
+        #expect(presets.count == 4)
+        #expect(presets.contains(.bone))
+        #expect(presets.contains(.softTissue))
+        #expect(presets.contains(.lung))
+        #expect(presets.contains(.angio))
+    }
+
+    @Test("VRPreset display names")
+    func vrPresetDisplayNames() {
+        #expect(VRPreset.bone.displayName == "Bone")
+        #expect(VRPreset.softTissue.displayName == "Soft Tissue")
+        #expect(VRPreset.lung.displayName == "Lung")
+        #expect(VRPreset.angio.displayName == "Angio")
+    }
+
+    @Test("VRPreset raw values")
+    func vrPresetRawValues() {
+        #expect(VRPreset.bone.rawValue == "bone")
+        #expect(VRPreset.softTissue.rawValue == "softTissue")
+        #expect(VRPreset.lung.rawValue == "lung")
+        #expect(VRPreset.angio.rawValue == "angio")
+    }
+
+    @Test("MPRPlane supports rotation")
+    func planeSupportsRotation() {
+        #expect(!MPRPlane.axial.supportsRotation)
+        #expect(!MPRPlane.coronal.supportsRotation)
+        #expect(!MPRPlane.sagittal.supportsRotation)
+        #expect(MPRPlane.projection.supportsRotation)
+    }
+
+    @Test("MPRPlane projection display name")
+    func projectionDisplayName() {
+        #expect(MPRPlane.projection.displayName == "3D View")
+        #expect(MPRPlane.projection.rawValue == 3)
     }
 }

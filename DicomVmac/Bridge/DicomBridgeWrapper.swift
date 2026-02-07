@@ -59,7 +59,9 @@ final class DicomBridgeWrapper: @unchecked Sendable {
             windowCenter: frame.windowCenter,
             windowWidth: frame.windowWidth,
             pixelSpacingX: frame.hasPixelSpacing != 0 ? frame.pixelSpacingX : nil,
-            pixelSpacingY: frame.hasPixelSpacing != 0 ? frame.pixelSpacingY : nil
+            pixelSpacingY: frame.hasPixelSpacing != 0 ? frame.pixelSpacingY : nil,
+            imagePositionZ: frame.hasImagePosition != 0 ? frame.imagePositionZ : nil,
+            sliceThickness: frame.sliceThickness > 0 ? frame.sliceThickness : nil
         )
     }
 
@@ -103,6 +105,49 @@ final class DicomBridgeWrapper: @unchecked Sendable {
         }
 
         let status = db_scan_folder(path, fileCallback, progressCallback, ctxPtr)
+        guard status == DB_STATUS_OK else {
+            throw DicomBridgeError.decodeFailed(status: status)
+        }
+    }
+
+    // MARK: - DICOMDIR Support
+
+    /// Check if a path points to a DICOMDIR file or folder containing one.
+    func isDicomdir(path: String) -> Bool {
+        return db_is_dicomdir(path) != 0
+    }
+
+    /// Scan a DICOMDIR file and extract metadata from referenced files.
+    /// - Parameters:
+    ///   - path: Path to DICOMDIR file or folder containing one.
+    ///   - onFile: Called for each valid DICOM file found.
+    ///   - onProgress: Called periodically with (recordsProcessed, filesFound).
+    func scanDicomdir(
+        path: String,
+        onFile: @escaping @Sendable (DicomTagData) -> Void,
+        onProgress: @escaping @Sendable (Int, Int) -> Void
+    ) throws {
+        let ctx = ScanContext(onFile: onFile, onProgress: onProgress)
+        let ctxPtr = Unmanaged.passRetained(ctx).toOpaque()
+        defer { Unmanaged<ScanContext>.fromOpaque(ctxPtr).release() }
+
+        let fileCallback: DB_DicomdirFileCallback = { userData, tagsPtr, filePathPtr in
+            guard let userData, let tagsPtr, let filePathPtr else { return }
+            let ctx = Unmanaged<ScanContext>.fromOpaque(userData)
+                .takeUnretainedValue()
+            let filePath = String(cString: filePathPtr)
+            let tagData = DicomTagData.from(tagsPtr: tagsPtr, filePath: filePath)
+            ctx.onFile(tagData)
+        }
+
+        let progressCallback: DB_DicomdirProgressCallback = { userData, processed, found in
+            guard let userData else { return }
+            let ctx = Unmanaged<ScanContext>.fromOpaque(userData)
+                .takeUnretainedValue()
+            ctx.onProgress(Int(processed), Int(found))
+        }
+
+        let status = db_scan_dicomdir(path, fileCallback, progressCallback, ctxPtr)
         guard status == DB_STATUS_OK else {
             throw DicomBridgeError.decodeFailed(status: status)
         }
@@ -195,6 +240,8 @@ struct FrameData: Sendable {
     let windowWidth: Double
     let pixelSpacingX: Double?  // mm per pixel (column direction), nil if unknown
     let pixelSpacingY: Double?  // mm per pixel (row direction), nil if unknown
+    let imagePositionZ: Double? // Z component of ImagePositionPatient, nil if unknown
+    let sliceThickness: Double? // SliceThickness tag value, nil if unknown
 }
 
 enum DicomBridgeError: Error, LocalizedError {

@@ -9,9 +9,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <algorithm>
 
 #include "dcmtk/dcmdata/dctk.h"
 #include "dcmtk/dcmimgle/dcmimage.h"
+#include "dcmtk/dcmdata/dcdicdir.h"
+#include "dcmtk/dcmdata/dcdirrec.h"
 
 namespace fs = std::filesystem;
 
@@ -64,6 +67,9 @@ DB_Status db_decode_frame16(const char* filepath,
         outFrame->pixelSpacingX = 1.0;  // Test pattern: 1mm per pixel
         outFrame->pixelSpacingY = 1.0;
         outFrame->hasPixelSpacing = 1;
+        outFrame->imagePositionZ = 0.0;
+        outFrame->sliceThickness = 1.0;
+        outFrame->hasImagePosition = 1;
         return DB_STATUS_OK;
     }
 
@@ -105,6 +111,23 @@ DB_Status db_decode_frame16(const char* filepath,
         dataset->findAndGetFloat64(DCM_PixelSpacing, pixelSpacingX, 1);
         hasPixelSpacing = 1;
     }
+
+    // Read ImagePositionPatient (format: "x\y\z") for slice Z position
+    Float64 imagePositionZ = 0.0;
+    int hasImagePosition = 0;
+    const char* ippStr = nullptr;
+    if (dataset->findAndGetString(DCM_ImagePositionPatient, ippStr).good() && ippStr) {
+        // Parse "x\y\z" format - extract Z component (third value)
+        Float64 x = 0, y = 0, z = 0;
+        if (sscanf(ippStr, "%lf\\%lf\\%lf", &x, &y, &z) == 3) {
+            imagePositionZ = z;
+            hasImagePosition = 1;
+        }
+    }
+
+    // Read SliceThickness as fallback for slice spacing
+    Float64 sliceThickness = 0.0;
+    dataset->findAndGetFloat64(DCM_SliceThickness, sliceThickness);
 
     // Use DicomImage for pixel access (handles photometric interpretation)
     DicomImage image(&fileFormat, dataset->getOriginalXfer(),
@@ -152,6 +175,9 @@ DB_Status db_decode_frame16(const char* filepath,
     outFrame->pixelSpacingX = pixelSpacingX;
     outFrame->pixelSpacingY = pixelSpacingY;
     outFrame->hasPixelSpacing = hasPixelSpacing;
+    outFrame->imagePositionZ = imagePositionZ;
+    outFrame->sliceThickness = sliceThickness;
+    outFrame->hasImagePosition = hasImagePosition;
 
     // If no window values in file, compute reasonable defaults
     if (outFrame->windowWidth <= 0.0) {
@@ -279,4 +305,135 @@ DB_Status db_scan_folder(const char* folderPath,
     }
 
     return DB_STATUS_OK;
+}
+
+// --- DICOMDIR Support ---
+
+// Helper: Recursively process DICOMDIR records
+static void processDirectoryRecord(DcmDirectoryRecord* rec,
+                                    const fs::path& dicomdirDir,
+                                    DB_DicomdirFileCallback onFile,
+                                    DB_DicomdirProgressCallback onProgress,
+                                    void* userData,
+                                    int& recordsProcessed,
+                                    int& filesFound) {
+    if (!rec) return;
+
+    recordsProcessed++;
+
+    // Only process IMAGE records
+    if (rec->getRecordType() == ERT_Image) {
+        // Get referenced file ID (backslash-separated path)
+        const char* refFileID = nullptr;
+        if (rec->findAndGetString(DCM_ReferencedFileID, refFileID).good() && refFileID) {
+            // Convert DICOM path separators (\) to OS separators (/)
+            std::string relativePath(refFileID);
+            std::replace(relativePath.begin(), relativePath.end(), '\\', '/');
+
+            // Build absolute path relative to DICOMDIR location
+            fs::path absPath = dicomdirDir / relativePath;
+            std::string absPathStr = absPath.string();
+
+            // Extract tags from the actual DICOM file
+            DB_DicomTags tags;
+            if (db_extract_tags(absPathStr.c_str(), &tags) == DB_STATUS_OK) {
+                filesFound++;
+                onFile(userData, &tags, absPathStr.c_str());
+            }
+        }
+    }
+
+    // Report progress every 20 records
+    if (onProgress && (recordsProcessed % 20 == 0)) {
+        onProgress(userData, recordsProcessed, filesFound);
+    }
+
+    // Recurse into child records
+    unsigned long numChildren = rec->cardSub();
+    for (unsigned long i = 0; i < numChildren; i++) {
+        DcmDirectoryRecord* child = rec->getSub(i);
+        processDirectoryRecord(child, dicomdirDir, onFile, onProgress,
+                               userData, recordsProcessed, filesFound);
+    }
+}
+
+DB_Status db_scan_dicomdir(const char* dicomdirPath,
+                            DB_DicomdirFileCallback onFile,
+                            DB_DicomdirProgressCallback onProgress,
+                            void* userData) {
+    if (!dicomdirPath || !onFile) return DB_STATUS_ERROR;
+
+    std::error_code ec;
+    fs::path dicomdirFile(dicomdirPath);
+
+    // If path is a directory, look for DICOMDIR file inside
+    if (fs::is_directory(dicomdirFile, ec)) {
+        dicomdirFile = dicomdirFile / "DICOMDIR";
+        if (!fs::exists(dicomdirFile, ec)) {
+            return DB_STATUS_NOT_FOUND;
+        }
+    }
+
+    if (!fs::exists(dicomdirFile, ec)) {
+        return DB_STATUS_NOT_FOUND;
+    }
+
+    // Get the directory containing the DICOMDIR
+    fs::path dicomdirDir = dicomdirFile.parent_path();
+
+    // Load DICOMDIR using DCMTK
+    DcmDicomDir dicomdir(dicomdirFile.string().c_str());
+    if (dicomdir.error().bad()) {
+        return DB_STATUS_ERROR;
+    }
+
+    // Get root record and traverse hierarchy
+    DcmDirectoryRecord& rootRec = dicomdir.getRootRecord();
+    int recordsProcessed = 0;
+    int filesFound = 0;
+
+    unsigned long numChildren = rootRec.cardSub();
+    for (unsigned long i = 0; i < numChildren; i++) {
+        DcmDirectoryRecord* child = rootRec.getSub(i);
+        processDirectoryRecord(child, dicomdirDir, onFile, onProgress,
+                               userData, recordsProcessed, filesFound);
+    }
+
+    // Final progress callback
+    if (onProgress) {
+        onProgress(userData, recordsProcessed, filesFound);
+    }
+
+    return DB_STATUS_OK;
+}
+
+int db_is_dicomdir(const char* path) {
+    if (!path) return 0;
+
+    std::error_code ec;
+    fs::path p(path);
+
+    // If it's a file, check if it's named DICOMDIR
+    if (fs::is_regular_file(p, ec)) {
+        std::string filename = p.filename().string();
+        // Convert to uppercase for case-insensitive comparison
+        std::transform(filename.begin(), filename.end(), filename.begin(), ::toupper);
+        if (filename == "DICOMDIR") {
+            // Verify it's a valid DICOMDIR
+            DcmDicomDir dicomdir(path);
+            return dicomdir.error().good() ? 1 : 0;
+        }
+        return 0;
+    }
+
+    // If it's a directory, check for DICOMDIR file inside
+    if (fs::is_directory(p, ec)) {
+        fs::path dicomdirFile = p / "DICOMDIR";
+        if (fs::exists(dicomdirFile, ec)) {
+            DcmDicomDir dicomdir(dicomdirFile.string().c_str());
+            return dicomdir.error().good() ? 1 : 0;
+        }
+    }
+
+    return 0;
 }
