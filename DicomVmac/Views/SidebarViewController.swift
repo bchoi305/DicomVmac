@@ -50,6 +50,7 @@ final class SidebarViewController: NSViewController {
     private var rootItems: [SidebarItem] = []
     private var emptyLabel: NSTextField?
     nonisolated(unsafe) private var dbObserver: Any?
+    nonisolated(unsafe) private var mprObserver: Any?
 
     override func loadView() {
         view = NSView(frame: NSRect(x: 0, y: 0, width: 250, height: 600))
@@ -68,11 +69,20 @@ final class SidebarViewController: NSViewController {
             self?.reloadData()
         }
 
+        mprObserver = NotificationCenter.default.addObserver(
+            forName: .dicomOpenInMPR, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.openSelectedSeriesInMPR()
+        }
+
         reloadData()
     }
 
     deinit {
         if let observer = dbObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = mprObserver {
             NotificationCenter.default.removeObserver(observer)
         }
     }
@@ -90,6 +100,14 @@ final class SidebarViewController: NSViewController {
         column.isEditable = false
         outlineView.addTableColumn(column)
         outlineView.outlineTableColumn = column
+
+        // Context menu for series items
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Open in MPR",
+                     action: #selector(openInMPRAction(_:)),
+                     keyEquivalent: "")
+        menu.delegate = self
+        outlineView.menu = menu
 
         outlineView.dataSource = self
         outlineView.delegate = self
@@ -171,6 +189,37 @@ final class SidebarViewController: NSViewController {
         }
     }
 
+    // MARK: - MPR Support
+
+    /// Get the currently selected series, if any.
+    private func selectedSeries() -> Series? {
+        let row = outlineView.selectedRow
+        guard row >= 0,
+              let sidebarItem = outlineView.item(atRow: row) as? SidebarItem,
+              case .series(let series) = sidebarItem.node else {
+            return nil
+        }
+        return series
+    }
+
+    /// Open the currently selected series in MPR view.
+    private func openSelectedSeriesInMPR() {
+        guard let series = selectedSeries() else {
+            let alert = NSAlert()
+            alert.messageText = "No Series Selected"
+            alert.informativeText = "Please select a series to open in MPR view."
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return
+        }
+        MPRWindowController.openMPR(for: series)
+    }
+
+    @objc private func openInMPRAction(_ sender: Any?) {
+        openSelectedSeriesInMPR()
+    }
+
 }
 
 // MARK: - NSDraggingDestination
@@ -192,11 +241,8 @@ extension SidebarViewController {
         ) as? [URL] else { return false }
 
         for url in urls {
-            var isDir: ObjCBool = false
-            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir),
-               isDir.boolValue {
-                AppDelegate.shared.indexFolder(at: url.path)
-            }
+            // Use smart import that auto-detects DICOMDIR vs folder
+            AppDelegate.shared.importPath(url.path)
         }
         return true
     }
@@ -280,6 +326,20 @@ extension SidebarViewController: NSOutlineViewDelegate {
                 name: .dicomSeriesDidSelect,
                 object: nil,
                 userInfo: ["series": series])
+        }
+    }
+}
+
+// MARK: - NSMenuDelegate
+
+extension SidebarViewController: NSMenuDelegate {
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        // Enable "Open in MPR" only when a series is selected
+        for item in menu.items {
+            if item.action == #selector(openInMPRAction(_:)) {
+                item.isEnabled = selectedSeries() != nil
+            }
         }
     }
 }

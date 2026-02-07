@@ -187,6 +187,16 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         uniforms.panOffset
     }
 
+    /// Current window center (for linked W/L).
+    var currentWindowCenter: Float {
+        uniforms.windowCenter
+    }
+
+    /// Current window width (for linked W/L).
+    var currentWindowWidth: Float {
+        uniforms.windowWidth
+    }
+
     // MARK: - Dynamic Texture
 
     func updateTexture(frameData: FrameData) {

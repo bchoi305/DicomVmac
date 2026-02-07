@@ -9,7 +9,17 @@
 import AppKit
 import MetalKit
 
+/// Delegate protocol for viewer state changes (used for linking).
+@MainActor
+protocol ViewerViewControllerDelegate: AnyObject {
+    func viewer(_ viewer: ViewerViewController, didScrollToSlice index: Int, totalSlices: Int)
+    func viewer(_ viewer: ViewerViewController, didChangeWindowLevel center: Float, width: Float)
+    func viewer(_ viewer: ViewerViewController, didChangeZoom scale: Float)
+}
+
 final class ViewerViewController: NSViewController {
+
+    weak var delegate: ViewerViewControllerDelegate?
 
     private var mtkView: MTKView!
     private(set) var renderer: MetalRenderer?
@@ -18,10 +28,13 @@ final class ViewerViewController: NSViewController {
     private var prefetchManager: PrefetchManager?
 
     // Series navigation state
-    private var currentSeries: Series?
+    private(set) var currentSeries: Series?
     private var currentInstances: [Instance] = []
     private var currentSliceIndex: Int = 0
     private var lastScrollDelta: Int = 0
+
+    /// Total number of slices in the current series.
+    var sliceCount: Int { currentInstances.count }
 
     // Overlay labels
     private var sliceLabel: NSTextField!
@@ -161,12 +174,17 @@ final class ViewerViewController: NSViewController {
         }
     }
 
-    private func loadSlice(at index: Int) {
+    private func loadSlice(at index: Int, notify: Bool = true) {
         guard index >= 0 && index < currentInstances.count else { return }
         currentSliceIndex = index
         toolState.setSliceIndex(index)
         updateSliceLabel()
         updateAnnotations()
+
+        // Notify delegate of scroll change
+        if notify {
+            delegate?.viewer(self, didScrollToSlice: index, totalSlices: currentInstances.count)
+        }
 
         let instance = currentInstances[index]
         let seriesRowID = currentSeries!.id!
@@ -202,6 +220,32 @@ final class ViewerViewController: NSViewController {
         }
     }
 
+    /// Scroll to a specific slice index (for linked scrolling).
+    func scrollToSlice(_ index: Int, notify: Bool = true) {
+        guard index >= 0 && index < currentInstances.count else { return }
+        if index != currentSliceIndex {
+            loadSlice(at: index, notify: notify)
+        }
+    }
+
+    /// Set window level (for linked W/L adjustment).
+    func setWindowLevel(center: Float, width: Float, notify: Bool = true) {
+        renderer?.setWindowLevel(center: center, width: width)
+        mtkView?.needsDisplay = true
+        if notify {
+            delegate?.viewer(self, didChangeWindowLevel: center, width: width)
+        }
+    }
+
+    /// Set zoom scale (for linked zooming).
+    func setZoom(scale: Float, notify: Bool = true) {
+        renderer?.setZoom(scale)
+        mtkView?.needsDisplay = true
+        if notify {
+            delegate?.viewer(self, didChangeZoom: scale)
+        }
+    }
+
     // MARK: - Scroll Wheel (Slice Navigation + Option = WL/WW)
 
     override func scrollWheel(with event: NSEvent) {
@@ -213,6 +257,9 @@ final class ViewerViewController: NSViewController {
             renderer.adjustWindowLevel(centerDelta: -deltaY * 2.0,
                                        widthDelta: deltaX * 2.0)
             mtkView?.needsDisplay = true
+            // Notify delegate for linked W/L
+            delegate?.viewer(self, didChangeWindowLevel: renderer.currentWindowCenter,
+                           width: renderer.currentWindowWidth)
             return
         }
 
@@ -297,6 +344,9 @@ final class ViewerViewController: NSViewController {
         if isOptionDragging {
             // Option + drag → WL/WW
             renderer.adjustWindowLevel(centerDelta: -dy, widthDelta: dx)
+            // Notify delegate for linked W/L
+            delegate?.viewer(self, didChangeWindowLevel: renderer.currentWindowCenter,
+                           width: renderer.currentWindowWidth)
         } else {
             // Regular drag → pan
             let viewSize = view.bounds.size
@@ -334,6 +384,8 @@ final class ViewerViewController: NSViewController {
         let scale = 1.0 + Float(event.magnification)
         renderer.adjustZoom(factor: scale)
         mtkView?.needsDisplay = true
+        // Notify delegate for linked zoom
+        delegate?.viewer(self, didChangeZoom: renderer.currentZoomScale)
     }
 
     // MARK: - Keyboard Shortcuts
